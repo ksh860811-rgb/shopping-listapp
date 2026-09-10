@@ -68,6 +68,7 @@
     font-family: inherit;
     cursor: pointer;
   }
+  button:disabled { opacity: 0.5; cursor: default; }
   .add-btn {
     padding: 12px 18px;
     font-size: 1rem;
@@ -124,6 +125,15 @@
     padding: 40px 0;
     font-size: 0.9rem;
   }
+  .error {
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    font-size: 0.85rem;
+  }
   .footer {
     margin-top: 16px;
     display: flex;
@@ -140,21 +150,23 @@
     border-radius: 8px;
     font-size: 0.8rem;
   }
-  .clear-btn:hover { color: var(--danger); border-color: var(--danger); }
+  .clear-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 </style>
 </head>
 <body>
 <div class="app">
   <h1>🛒 쇼핑 리스트</h1>
-  <div class="subtitle">항목을 추가하고, 체크하고, 삭제하세요. 자동으로 저장됩니다.</div>
+  <div class="subtitle">항목을 추가하고, 체크하고, 삭제하세요. Supabase에 자동으로 저장됩니다.</div>
+
+  <div class="error" id="error" hidden></div>
 
   <form class="input-row" id="addForm">
     <input type="text" id="itemInput" placeholder="살 것을 입력하세요…" autocomplete="off" required>
-    <button type="submit" class="add-btn">추가</button>
+    <button type="submit" class="add-btn" id="addBtn">추가</button>
   </form>
 
   <ul id="list"></ul>
-  <div class="empty" id="empty">아직 항목이 없습니다.</div>
+  <div class="empty" id="empty">불러오는 중…</div>
 
   <div class="footer">
     <span id="count"></span>
@@ -162,28 +174,119 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
-  const STORAGE_KEY = "shopping-list-items";
+  const SUPABASE_URL = "https://pouwttbjhuaajoeuhanp.supabase.co";
+  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_UMihx96yeYjZSx-9tjX3Fg_gnbRGc-i";
+  const TABLE = "shopping_items";
+
+  const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+
   const listEl = document.getElementById("list");
   const emptyEl = document.getElementById("empty");
   const countEl = document.getElementById("count");
+  const errorEl = document.getElementById("error");
   const form = document.getElementById("addForm");
   const input = document.getElementById("itemInput");
+  const addBtn = document.getElementById("addBtn");
+  const clearBtn = document.getElementById("clearChecked");
 
-  let items = load();
+  let items = [];
 
-  function load() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-    } catch {
-      return [];
-    }
+  function showError(message, err) {
+    if (err) console.error(err);
+    errorEl.textContent = message;
+    errorEl.hidden = false;
   }
 
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-    } catch {}
+  function clearError() {
+    errorEl.hidden = true;
+  }
+
+  async function load() {
+    const { data, error } = await db
+      .from(TABLE)
+      .select("id, text, checked, created_at")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      emptyEl.textContent = "목록을 불러오지 못했습니다.";
+      showError("목록을 불러오지 못했습니다: " + error.message, error);
+      return;
+    }
+
+    clearError();
+    items = data;
+    emptyEl.textContent = "아직 항목이 없습니다.";
+    render();
+  }
+
+  async function addItem(text) {
+    const { data, error } = await db
+      .from(TABLE)
+      .insert({ text, checked: false })
+      .select("id, text, checked, created_at")
+      .single();
+
+    if (error) {
+      showError("항목을 추가하지 못했습니다: " + error.message, error);
+      return;
+    }
+
+    clearError();
+    items.push(data);
+    render();
+  }
+
+  async function toggleItem(item, checked) {
+    const previous = item.checked;
+    item.checked = checked;
+    render();
+
+    const { error } = await db
+      .from(TABLE)
+      .update({ checked })
+      .eq("id", item.id);
+
+    if (error) {
+      item.checked = previous;
+      render();
+      showError("변경 사항을 저장하지 못했습니다: " + error.message, error);
+      return;
+    }
+
+    clearError();
+  }
+
+  async function deleteItem(item) {
+    const { error } = await db.from(TABLE).delete().eq("id", item.id);
+
+    if (error) {
+      showError("항목을 삭제하지 못했습니다: " + error.message, error);
+      return;
+    }
+
+    clearError();
+    items = items.filter((i) => i.id !== item.id);
+    render();
+  }
+
+  async function clearChecked() {
+    const ids = items.filter((i) => i.checked).map((i) => i.id);
+    if (!ids.length) return;
+
+    clearBtn.disabled = true;
+    const { error } = await db.from(TABLE).delete().in("id", ids);
+    clearBtn.disabled = false;
+
+    if (error) {
+      showError("체크된 항목을 삭제하지 못했습니다: " + error.message, error);
+      return;
+    }
+
+    clearError();
+    items = items.filter((i) => !i.checked);
+    render();
   }
 
   function render() {
@@ -198,9 +301,7 @@
       checkbox.type = "checkbox";
       checkbox.checked = item.checked;
       checkbox.addEventListener("change", () => {
-        item.checked = checkbox.checked;
-        save();
-        render();
+        toggleItem(item, checkbox.checked);
       });
 
       const label = document.createElement("span");
@@ -212,9 +313,7 @@
       del.textContent = "✕";
       del.title = "삭제";
       del.addEventListener("click", () => {
-        items = items.filter((i) => i.id !== item.id);
-        save();
-        render();
+        deleteItem(item);
       });
 
       li.append(checkbox, label, del);
@@ -227,23 +326,21 @@
       : "";
   }
 
-  form.addEventListener("submit", (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    items.push({ id: Date.now() + Math.random(), text, checked: false });
+
     input.value = "";
-    save();
-    render();
+    addBtn.disabled = true;
+    await addItem(text);
+    addBtn.disabled = false;
+    input.focus();
   });
 
-  document.getElementById("clearChecked").addEventListener("click", () => {
-    items = items.filter((i) => !i.checked);
-    save();
-    render();
-  });
+  clearBtn.addEventListener("click", clearChecked);
 
-  render();
+  load();
 </script>
 </body>
 </html>
